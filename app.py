@@ -152,8 +152,21 @@ else:
 with st.sidebar:
     time_mode = st.radio("Time range", ["Past 1Y", "Custom range"], index=0, horizontal=False)
     if time_mode == "Custom range":
-        from_date = st.date_input("From", value=(pd.Timestamp.today() - pd.DateOffset(years=1)).date())
-        to_date = st.date_input("To", value=pd.Timestamp.today().date())
+        # Initialize session state for dates
+        if "from_date" not in st.session_state:
+            st.session_state.from_date = (pd.Timestamp.today() - pd.DateOffset(years=1)).date()
+        if "to_date" not in st.session_state:
+            st.session_state.to_date = pd.Timestamp.today().date()
+
+        from_date = st.date_input("From", value=st.session_state.from_date, key="from_date")
+        cols = st.columns([3,2])
+        with cols[0]:
+            to_date = st.date_input("To", value=st.session_state.to_date, key="to_date")
+        with cols[1]:
+            if st.button("Set To Today"):
+                st.session_state.to_date = pd.Timestamp.today().date()
+                st.rerun()
+
         if from_date > to_date:
             st.warning("`From` is after `To`. Please adjust.")
     else:
@@ -196,25 +209,87 @@ try:
     lei_yoy = filter_by_range(lei_yoy_raw, time_mode, from_date, to_date)
 
     last_update = max(baa10y.index.max(), t10y2y.index.max(), lei_yoy.index.max())
+
+# Latest values for risk summary
+latest_credit = float(baa10y.iloc[-1]) if not baa10y.empty else float("nan")
+latest_yc = float(t10y2y.iloc[-1]) if not t10y2y.empty else float("nan")
+latest_lei = float(lei_yoy.iloc[-1]) if not lei_yoy.empty else float("nan")
+
+breach_credit = compute_breach(latest_credit, credit_spread_thr, "above") if not np.isnan(latest_credit) else False
+breach_yc = compute_breach(latest_yc, yield_curve_thr, "below") if not np.isnan(latest_yc) else False
+breach_lei = compute_breach(latest_lei, lei_yoy_thr, "below") if not np.isnan(latest_lei) else False
+num_breaches = int(breach_credit) + int(breach_yc) + int(breach_lei)
+
+if num_breaches == 0:
+    risk_label, risk_color = "OK", "#10b981"
+elif num_breaches == 3:
+    risk_label, risk_color = "DANGER", "#ef4444"
+else:
+    risk_label, risk_color = "RISK", "#f59e0b"
+
+# Render a top-level button-like badge
+st.markdown(
+    f"""<div style=\"display:flex;justify-content:flex-start;gap:8px;align-items:center;margin-bottom:8px;\"><button style=\"background:{risk_color};color:white;border:none;padding:8px 14px;border-radius:10px;font-weight:800;cursor:default;\">Overall Risk: {risk_label}</button></div>""",
+    unsafe_allow_html=True
+)
 except Exception as e:
     st.error(f"Error fetching data: {e}")
     st.stop()
 
 # ---------------------------
+# Overall Risk (computed from latest values vs thresholds)
+# ---------------------------
+def compute_breach(latest_val, threshold, breach_if):
+    return (latest_val >= threshold) if breach_if == "above" else (latest_val <= threshold)
+
+
+# Combined view plotting
+def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
+                       thr_credit: float, thr_yc: float, thr_lei: float):
+    fig = go.Figure()
+
+    # Distinct colors for series
+    color_credit = "#1f77b4"  # blue
+    color_yc = "#2ca02c"      # green
+    color_lei = "#ff7f0e"     # orange
+
+    # Series traces
+    fig.add_trace(go.Scatter(x=baa10y.index, y=baa10y.values, mode="lines", name="Credit Spread (BAA10Y)", line=dict(color=color_credit)))
+    fig.add_trace(go.Scatter(x=t10y2y.index, y=t10y2y.values, mode="lines", name="Yield Curve (T10Y−2Y)", line=dict(color=color_yc)))
+    fig.add_trace(go.Scatter(x=lei_yoy.index, y=lei_yoy.values, mode="lines", name="OECD CLI YoY %", line=dict(color=color_lei)))
+
+    # Threshold lines with distinct colors
+    fig.add_hline(y=thr_credit, line_dash="dash", line_color=color_credit, annotation_text=f"Credit danger @ {thr_credit:g}", annotation_font_color=color_credit)
+    fig.add_hline(y=thr_yc, line_dash="dash", line_color=color_yc, annotation_text=f"YieldCurve danger @ {thr_yc:g}", annotation_font_color=color_yc)
+    fig.add_hline(y=thr_lei, line_dash="dash", line_color=color_lei, annotation_text=f"CLI YoY danger @ {thr_lei:g}%", annotation_font_color=color_lei)
+
+    fig.update_layout(
+        title="Combined View — All Indicators",
+        margin=dict(l=40, r=40, t=60, b=40),
+        height=520,
+        xaxis_title="Date",
+        yaxis_title="Value / %",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------
 # Render
 # ---------------------------
 
-with col1:
-    st.subheader("Credit Spread: Moody's Baa − 10Y Treasury")
-    plot_indicator(baa10y, "Credit Spread (BAA10Y)", " ppts", credit_spread_thr, breach_if="above")
-
-with col2:
-    st.subheader("Yield Curve: 10Y − 2Y")
-    plot_indicator(t10y2y, "Yield Curve (T10Y−2Y)", " ppts", yield_curve_thr, breach_if="below")
-
-with col3:
-    st.subheader("Leading Indicator (OECD CLI) — YoY change")
-    plot_indicator(lei_yoy, "OECD CLI YoY % (USALOLITOAASTSAM)", " %", lei_yoy_thr, breach_if="below")
+view_mode = st.radio("View", ["Panels", "Combined"], index=0, horizontal=True)
+if view_mode == "Combined":
+    plot_combined_view(baa10y, t10y2y, lei_yoy, credit_spread_thr, yield_curve_thr, lei_yoy_thr)
+else:
+    with col1:
+        st.subheader("Credit Spread: Moody's Baa − 10Y Treasury")
+        plot_indicator(baa10y, "Credit Spread (BAA10Y)", " ppts", credit_spread_thr, breach_if="above")
+    with col2:
+        st.subheader("Yield Curve: 10Y − 2Y")
+        plot_indicator(t10y2y, "Yield Curve (T10Y−2Y)", " ppts", yield_curve_thr, breach_if="below")
+    with col3:
+        st.subheader("Leading Indicator (OECD CLI) — YoY change")
+        plot_indicator(lei_yoy, "OECD CLI YoY % (USALOLITOAASTSAM)", " %", lei_yoy_thr, breach_if="below")
 
 st.caption(f"Last data point across series: {last_update.date()} • Source: FRED (BAA10Y, T10Y2Y, USALOLITOAASTSAM)")
 st.caption("Note: LEI proxy now uses OECD Composite Leading Indicator for the US (series USALOLITOAASTSAM on FRED). The Conference Board LEI is proprietary; swap it in if you have access.")
