@@ -1,19 +1,21 @@
 # app.py
 # Markets Stress Dashboard — Credit Spreads, Yield Curve, and Leading Indicator (OECD CLI)
 # Features:
-# - Uses FRED API (BAA10Y, T10Y2Y, USALOLITOAASTSAM)
+# - FRED API (BAA10Y, T10Y2Y, USALOLITOAASTSAM)
 # - Danger threshold lines (red in panel views; distinct per-series colors in combined view)
-# - Time range: default Past 1Y, or Custom range with From/To date pickers and "Set To Today" button
+# - Time range: default Past 1Y, or Custom range with From/To and "Set To Today" button
 # - Overall Risk badge (OK / RISK / DANGER)
-# - Hides API key input when using Streamlit Secrets
+# - Panels and Combined view
+# - Entry/Exit markers and tables
+# - Shaded background during danger periods (per panel; and "ALL danger" in combined view)
 
 import os
+from datetime import date
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from fredapi import Fred
-from datetime import date
 
 # ---------------------------
 # Helpers
@@ -28,15 +30,6 @@ def fetch_fred_series(api_key: str, series_id: str) -> pd.Series:
     s.name = series_id
     return s
 
-def trim_window(s: pd.Series, window_label: str) -> pd.Series:
-    # (kept for backward-compatibility; not used when custom range is selected)
-    if window_label == "Max":
-        return s
-    now = s.index.max()
-    years = {"1Y": 1, "2Y": 2, "3Y": 3, "5Y": 5}.get(window_label, 2)
-    start = now - pd.DateOffset(years=years)
-    return s.loc[s.index >= start]
-
 def filter_by_range(s: pd.Series, mode: str, start_dt=None, end_dt=None) -> pd.Series:
     """Filter a time series by either 'Past 1Y' or custom [start_dt, end_dt]."""
     if s is None or s.empty:
@@ -48,9 +41,7 @@ def filter_by_range(s: pd.Series, mode: str, start_dt=None, end_dt=None) -> pd.S
     # Custom range
     if start_dt is None and end_dt is None:
         return s
-    # Convert date inputs to Timestamps
     start_ts = pd.Timestamp(start_dt) if start_dt is not None else s.index.min()
-    # include end date by adding 1 day then using '<'
     end_ts = (pd.Timestamp(end_dt) + pd.Timedelta(days=1)) if end_dt is not None else (s.index.max() + pd.Timedelta(days=1))
     return s.loc[(s.index >= start_ts) & (s.index < end_ts)]
 
@@ -59,6 +50,49 @@ def compute_lei_yoy(lei_level: pd.Series) -> pd.Series:
     lei_yoy = lei_level.pct_change(12) * 100.0
     lei_yoy.name = "LEI YoY %"
     return lei_yoy.dropna()
+
+def breach_series(s: pd.Series, threshold: float, breach_if: str) -> pd.Series:
+    """Return boolean Series: True when value breaches threshold per rule."""
+    if s is None or s.empty:
+        return pd.Series(dtype=bool)
+    if breach_if == "above":
+        b = s >= threshold
+    else:
+        b = s <= threshold
+    b.name = f"breach({s.name})"
+    return b
+
+def transitions(b: pd.Series):
+    """Return (entries, exits) where entries are False->True and exits True->False."""
+    if b is None or b.empty:
+        return [], []
+    b_aligned = b.astype(bool)
+    prev = b_aligned.shift(1).fillna(False)
+    entries = b_aligned & (~prev)
+    exits = (~b_aligned) & prev
+    entry_dates = list(entries[entries].index)
+    exit_dates = list(exits[exits].index)
+    return entry_dates, exit_dates
+
+def intervals_from_boolean(b: pd.Series):
+    """Return list of (start, end) timestamps for contiguous True regions in boolean series b."""
+    if b is None or b.empty:
+        return []
+    bs = b.astype(bool)
+    start_points = bs & (~bs.shift(1).fillna(False))
+    end_points = (~bs) & (bs.shift(1).fillna(False))
+    starts = list(start_points[start_points].index)
+    ends = list(end_points[end_points].index)
+    # If series ends in True, close the last interval at the last index
+    if len(starts) > len(ends):
+        ends.append(bs.index.max())
+    # Pair up
+    return list(zip(starts, ends))
+
+def add_vrects(fig, intervals, fillcolor="rgba(239,68,68,0.12)"):
+    """Add vertical shaded rectangles for each (start, end) interval."""
+    for (x0, x1) in intervals:
+        fig.add_vrect(x0=x0, x1=x1, fillcolor=fillcolor, opacity=0.12, line_width=0)
 
 def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breach_if: str):
     """
@@ -77,6 +111,12 @@ def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breac
     # Build plotly chart
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name=title))
+
+    # Shaded danger regions for this series
+    b = breach_series(s, threshold, breach_if)
+    intervals = intervals_from_boolean(b)
+    add_vrects(fig, intervals, fillcolor="rgba(239,68,68,0.18)")  # red translucent
+
     # Add horizontal danger line (red)
     fig.add_hline(
         y=threshold,
@@ -115,6 +155,22 @@ def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breac
         </div>
         """, unsafe_allow_html=True
     )
+
+    # Entry/Exit markers
+    entry_dates, exit_dates = transitions(b)
+    if entry_dates:
+        fig.add_trace(go.Scatter(
+            x=entry_dates, y=[s.loc[d] for d in entry_dates if d in s.index],
+            mode="markers", name="Enter danger",
+            marker_symbol="triangle-up", marker_size=10
+        ))
+    if exit_dates:
+        fig.add_trace(go.Scatter(
+            x=exit_dates, y=[s.loc[d] for d in exit_dates if d in s.index],
+            mode="markers", name="Exit danger",
+            marker_symbol="triangle-down", marker_size=10
+        ))
+
     st.plotly_chart(fig, use_container_width=True)
 
 # Combined view plotting
@@ -127,7 +183,29 @@ def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
     color_yc = "#2ca02c"      # green
     color_lei = "#ff7f0e"     # orange
 
-    # Add series (only if non-empty)
+    # Build boolean breach series (fill missing with False)
+    b_credit = breach_series(baa10y, thr_credit, "above") if (baa10y is not None and not baa10y.empty) else pd.Series(dtype=bool)
+    b_yc = breach_series(t10y2y, thr_yc, "below") if (t10y2y is not None and not t10y2y.empty) else pd.Series(dtype=bool)
+    b_lei = breach_series(lei_yoy, thr_lei, "below") if (lei_yoy is not None and not lei_yoy.empty) else pd.Series(dtype=bool)
+
+    # Align to a common index (union), filling missing with False
+    idx = pd.Index([])
+    for b in [b_credit, b_yc, b_lei]:
+        if not b.empty:
+            idx = idx.union(b.index)
+    if len(idx) > 0:
+        b_credit = b_credit.reindex(idx, fill_value=False)
+        b_yc = b_yc.reindex(idx, fill_value=False)
+        b_lei = b_lei.reindex(idx, fill_value=False)
+
+    all_danger = b_credit & b_yc & b_lei
+    all_intervals = intervals_from_boolean(all_danger)
+
+    # Shade "ALL danger" periods (neutral gray)
+    for (x0, x1) in all_intervals:
+        fig.add_vrect(x0=x0, x1=x1, fillcolor="rgba(0,0,0,0.12)", opacity=0.12, line_width=0)
+
+    # Series traces (only if non-empty)
     if baa10y is not None and not baa10y.empty:
         fig.add_trace(go.Scatter(x=baa10y.index, y=baa10y.values, mode="lines",
                                  name="Credit Spread (BAA10Y)", line=dict(color=color_credit)))
@@ -145,6 +223,35 @@ def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
                                  name="OECD CLI YoY %", line=dict(color=color_lei)))
         fig.add_hline(y=thr_lei, line_dash="dash", line_color=color_lei,
                       annotation_text=f"CLI YoY danger @ {thr_lei:g}%", annotation_font_color=color_lei)
+
+    # Mark simultaneous "all-danger" entries/exits with diamonds
+    entries_all, exits_all = transitions(all_danger)
+    if entries_all:
+        fig.add_trace(go.Scatter(
+            x=entries_all,
+            y=[np.nanmean([
+                baa10y.loc[d] if (baa10y is not None and d in getattr(baa10y, "index", [])) else np.nan,
+                t10y2y.loc[d] if (t10y2y is not None and d in getattr(t10y2y, "index", [])) else np.nan,
+                lei_yoy.loc[d] if (lei_yoy is not None and d in getattr(lei_yoy, "index", [])) else np.nan,
+            ]) for d in entries_all],
+            mode="markers",
+            name="ALL Enter danger",
+            marker_symbol="diamond",
+            marker_size=12
+        ))
+    if exits_all:
+        fig.add_trace(go.Scatter(
+            x=exits_all,
+            y=[np.nanmean([
+                baa10y.loc[d] if (baa10y is not None and d in getattr(baa10y, "index", [])) else np.nan,
+                t10y2y.loc[d] if (t10y2y is not None and d in getattr(t10y2y, "index", [])) else np.nan,
+                lei_yoy.loc[d] if (lei_yoy is not None and d in getattr(lei_yoy, "index", [])) else np.nan,
+            ]) for d in exits_all],
+            mode="markers",
+            name="ALL Exit danger",
+            marker_symbol="diamond-open",
+            marker_size=12
+        ))
 
     fig.update_layout(
         title="Combined View — All Indicators",
@@ -294,14 +401,38 @@ else:
     with col1:
         st.subheader("Credit Spread: Moody's Baa − 10Y Treasury")
         plot_indicator(baa10y, "Credit Spread (BAA10Y)", " ppts", credit_spread_thr, breach_if="above")
+        # Entry/Exit table
+        b1 = breach_series(baa10y, credit_spread_thr, "above")
+        e1, x1 = transitions(b1)
+        if e1 or x1:
+            df1 = pd.DataFrame({"Type": ["Enter"]*len(e1) + ["Exit"]*len(x1),
+                                "Date": list(e1) + list(x1)}).sort_values("Date").reset_index(drop=True)
+            st.caption("Credit Spread — danger entry/exit points")
+            st.dataframe(df1, use_container_width=True)
 
     with col2:
         st.subheader("Yield Curve: 10Y − 2Y")
         plot_indicator(t10y2y, "Yield Curve (T10Y−2Y)", " ppts", yield_curve_thr, breach_if="below")
+        # Entry/Exit table
+        b2 = breach_series(t10y2y, yield_curve_thr, "below")
+        e2, x2 = transitions(b2)
+        if e2 or x2:
+            df2 = pd.DataFrame({"Type": ["Enter"]*len(e2) + ["Exit"]*len(x2),
+                                "Date": list(e2) + list(x2)}).sort_values("Date").reset_index(drop=True)
+            st.caption("Yield Curve — danger entry/exit points")
+            st.dataframe(df2, use_container_width=True)
 
     with col3:
         st.subheader("Leading Indicator (OECD CLI) — YoY change")
         plot_indicator(lei_yoy, "OECD CLI YoY % (USALOLITOAASTSAM)", " %", lei_yoy_thr, breach_if="below")
+        # Entry/Exit table
+        b3 = breach_series(lei_yoy, lei_yoy_thr, "below")
+        e3, x3 = transitions(b3)
+        if e3 or x3:
+            df3 = pd.DataFrame({"Type": ["Enter"]*len(e3) + ["Exit"]*len(x3),
+                                "Date": list(e3) + list(x3)}).sort_values("Date").reset_index(drop=True)
+            st.caption("OECD CLI YoY — danger entry/exit points")
+            st.dataframe(df3, use_container_width=True)
 
 st.caption(f"Last data point across series: {last_update.date()} • Source: FRED (BAA10Y, T10Y2Y, USALOLITOAASTSAM)")
 st.caption("Note: LEI proxy uses OECD Composite Leading Indicator for the US (USALOLITOAASTSAM). The Conference Board LEI is proprietary.")
