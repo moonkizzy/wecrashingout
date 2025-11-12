@@ -1,14 +1,11 @@
 # app.py
-# Markets Stress Dashboard — Credit Spreads, Yield Curve, Leading Indicator (OECD CLI), and VIX table
+# Markets Stress Dashboard — Credit Spreads, Yield Curve, OECD CLI YoY, and VIX
 # Features:
 # - FRED API (BAA10Y, T10Y2Y, USALOLITOAASTSAM, VIXCLS)
-# - Danger threshold lines (red in panel views; distinct per-series colors in combined view)
-# - Time range: default Past 1Y, or Custom range with From/To and "Set To Today" button
-# - Overall Risk badge (OK / RISK / DANGER) based on the first three indicators
-# - Panels and Combined view
-# - Entry/Exit markers and tables
-# - Shaded background during danger periods (per panel; and "ALL danger" in combined view)
-# - Additional VIX table with danger entry/exit detection
+# - Danger thresholds with red lines, shaded danger periods, entry/exit markers & tables
+# - Time range presets (Past week/month/year/3y/5y/10y) + Custom range with "Set To Today"
+# - Overall Risk badge (OK/RISK/DANGER) using the first three indicators
+# - Panels and Combined view (optional VIX overlay)
 
 import os
 from datetime import date
@@ -32,19 +29,38 @@ def fetch_fred_series(api_key: str, series_id: str) -> pd.Series:
     return s
 
 def filter_by_range(s: pd.Series, mode: str, start_dt=None, end_dt=None) -> pd.Series:
-    """Filter a time series by either 'Past 1Y' or custom [start_dt, end_dt]."""
+    """Filter a time series by a preset mode or custom [start_dt, end_dt]."""
     if s is None or s.empty:
         return s
-    if mode == "Past 1Y":
+
+    # Presets
+    presets = {
+        "Past week": pd.DateOffset(weeks=1),
+        "Past month": pd.DateOffset(months=1),
+        "Past year": pd.DateOffset(years=1),
+        "Past 3 years": pd.DateOffset(years=3),
+        "Past 5 years": pd.DateOffset(years=5),
+        "Past 10 years": pd.DateOffset(years=10),
+        # Back-compat possible older label:
+        "Past 1Y": pd.DateOffset(years=1),
+    }
+
+    if mode in presets:
         end = s.index.max()
-        start = end - pd.DateOffset(years=1)
+        start = end - presets[mode]
         return s.loc[(s.index >= start) & (s.index <= end)]
+
     # Custom range
-    if start_dt is None and end_dt is None:
-        return s
-    start_ts = pd.Timestamp(start_dt) if start_dt is not None else s.index.min()
-    end_ts = (pd.Timestamp(end_dt) + pd.Timedelta(days=1)) if end_dt is not None else (s.index.max() + pd.Timedelta(days=1))
-    return s.loc[(s.index >= start_ts) & (s.index < end_ts)]
+    if mode == "Custom range":
+        if start_dt is None and end_dt is None:
+            return s
+        start_ts = pd.Timestamp(start_dt) if start_dt is not None else s.index.min()
+        # include end date by adding 1 day then using '<'
+        end_ts = (pd.Timestamp(end_dt) + pd.Timedelta(days=1)) if end_dt is not None else (s.index.max() + pd.Timedelta(days=1))
+        return s.loc[(s.index >= start_ts) & (s.index < end_ts)]
+
+    # Fallback: return whole series
+    return s
 
 def compute_lei_yoy(lei_level: pd.Series) -> pd.Series:
     """YoY % change from levels (12-month percent change)."""
@@ -87,38 +103,33 @@ def intervals_from_boolean(b: pd.Series):
     # If series ends in True, close the last interval at the last index
     if len(starts) > len(ends):
         ends.append(bs.index.max())
-    # Pair up
     return list(zip(starts, ends))
 
-def add_vrects(fig, intervals, fillcolor="rgba(239,68,68,0.12)"):
+def add_vrects(fig, intervals, fillcolor="rgba(239,68,68,0.18)"):
     """Add vertical shaded rectangles for each (start, end) interval."""
     for (x0, x1) in intervals:
-        fig.add_vrect(x0=x0, x1=x1, fillcolor=fillcolor, opacity=0.12, line_width=0)
+        fig.add_vrect(x0=x0, x1=x1, fillcolor=fillcolor, opacity=0.18, line_width=0)
 
 def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breach_if: str):
-    """
-    breach_if: 'above' or 'below'
-    """
+    """Plot a single indicator with threshold, shading, markers, and latest badge."""
     if s is None or s.empty:
         st.warning(f"No data available for {title}.")
         return
 
     latest_ts = s.index.max()
     latest_val = float(s.loc[latest_ts])
-
     breach = (latest_val >= threshold) if breach_if == "above" else (latest_val <= threshold)
     status = "DANGER" if breach else "OK"
 
-    # Build plotly chart
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name=title))
 
-    # Shaded danger regions for this series
+    # Shaded danger regions
     b = breach_series(s, threshold, breach_if)
     intervals = intervals_from_boolean(b)
-    add_vrects(fig, intervals, fillcolor="rgba(239,68,68,0.18)")  # red translucent
+    add_vrects(fig, intervals)
 
-    # Add horizontal danger line (red)
+    # Horizontal danger line (red)
     fig.add_hline(
         y=threshold,
         line_dash="dash",
@@ -128,33 +139,30 @@ def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breac
         annotation_font_color="red"
     )
 
-    # Add last-point marker
+    # Latest point
     fig.add_trace(go.Scatter(
-        x=[latest_ts], y=[latest_val],
-        mode="markers+text",
-        text=[f"{latest_val:.2f}{units}"],
-        textposition="top right",
+        x=[latest_ts], y=[latest_val], mode="markers+text",
+        text=[f"{latest_val:.2f}{units}"], textposition="top right",
         name="Latest"
     ))
 
     fig.update_layout(
-        title=title,
+        title=title, height=380,
         margin=dict(l=40, r=40, t=60, b=40),
-        height=380,
-        xaxis_title="Date",
-        yaxis_title=f"Value ({units})",
+        xaxis_title="Date", yaxis_title=f"Value ({units})",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
 
     # Status badge
-    badge_color = "#ef4444" if breach else "#10b981"  # red / green
+    badge_color = "#ef4444" if breach else "#10b981"
     st.markdown(
         f"""
         <div style="display:flex;align-items:center;gap:10px;">
             <div style="font-weight:600;">Latest: {latest_val:.2f}{units} &nbsp; • &nbsp; {latest_ts.date()}</div>
             <span style="background:{badge_color};color:white;padding:4px 10px;border-radius:999px;font-weight:700;">{status}</span>
         </div>
-        """, unsafe_allow_html=True
+        """,
+        unsafe_allow_html=True
     )
 
     # Entry/Exit markers
@@ -162,34 +170,34 @@ def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breac
     if entry_dates:
         fig.add_trace(go.Scatter(
             x=entry_dates, y=[s.loc[d] for d in entry_dates if d in s.index],
-            mode="markers", name="Enter danger",
-            marker_symbol="triangle-up", marker_size=10
+            mode="markers", name="Enter danger", marker_symbol="triangle-up", marker_size=10
         ))
     if exit_dates:
         fig.add_trace(go.Scatter(
             x=exit_dates, y=[s.loc[d] for d in exit_dates if d in s.index],
-            mode="markers", name="Exit danger",
-            marker_symbol="triangle-down", marker_size=10
+            mode="markers", name="Exit danger", marker_symbol="triangle-down", marker_size=10
         ))
 
     st.plotly_chart(fig, use_container_width=True)
 
-# Combined view plotting
 def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
-                       thr_credit: float, thr_yc: float, thr_lei: float):
+                       thr_credit: float, thr_yc: float, thr_lei: float,
+                       vix: pd.Series = None, vix_thr: float = 30.0, include_vix: bool = False):
+    """Combined chart for 3 indicators; optional VIX overlay. Shades when ALL three are in danger."""
     fig = go.Figure()
 
-    # Distinct colors for series
+    # Series colors
     color_credit = "#1f77b4"  # blue
     color_yc = "#2ca02c"      # green
     color_lei = "#ff7f0e"     # orange
+    color_vix = "#9467bd"     # purple
 
-    # Build boolean breach series (fill missing with False)
+    # Breach booleans for all-danger shading
     b_credit = breach_series(baa10y, thr_credit, "above") if (baa10y is not None and not baa10y.empty) else pd.Series(dtype=bool)
     b_yc = breach_series(t10y2y, thr_yc, "below") if (t10y2y is not None and not t10y2y.empty) else pd.Series(dtype=bool)
     b_lei = breach_series(lei_yoy, thr_lei, "below") if (lei_yoy is not None and not lei_yoy.empty) else pd.Series(dtype=bool)
 
-    # Align to a common index (union), filling missing with False
+    # Align to common index
     idx = pd.Index([])
     for b in [b_credit, b_yc, b_lei]:
         if not b.empty:
@@ -206,7 +214,7 @@ def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
     for (x0, x1) in all_intervals:
         fig.add_vrect(x0=x0, x1=x1, fillcolor="rgba(0,0,0,0.12)", opacity=0.12, line_width=0)
 
-    # Series traces (only if non-empty)
+    # Add main three series
     if baa10y is not None and not baa10y.empty:
         fig.add_trace(go.Scatter(x=baa10y.index, y=baa10y.values, mode="lines",
                                  name="Credit Spread (BAA10Y)", line=dict(color=color_credit)))
@@ -225,7 +233,14 @@ def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
         fig.add_hline(y=thr_lei, line_dash="dash", line_color=color_lei,
                       annotation_text=f"CLI YoY danger @ {thr_lei:g}%", annotation_font_color=color_lei)
 
-    # Mark simultaneous "all-danger" entries/exits with diamonds
+    # Optional VIX overlay
+    if include_vix and (vix is not None) and (not vix.empty):
+        fig.add_trace(go.Scatter(x=vix.index, y=vix.values, mode="lines",
+                                 name="VIX (overlay)", line=dict(color=color_vix)))
+        fig.add_hline(y=vix_thr, line_dash="dash", line_color=color_vix,
+                      annotation_text=f"VIX danger @ {vix_thr:g}", annotation_font_color=color_vix)
+
+    # Mark simultaneous "all-danger" entries/exits
     entries_all, exits_all = transitions(all_danger)
     if entries_all:
         fig.add_trace(go.Scatter(
@@ -235,10 +250,7 @@ def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
                 t10y2y.loc[d] if (t10y2y is not None and d in getattr(t10y2y, "index", [])) else np.nan,
                 lei_yoy.loc[d] if (lei_yoy is not None and d in getattr(lei_yoy, "index", [])) else np.nan,
             ]) for d in entries_all],
-            mode="markers",
-            name="ALL Enter danger",
-            marker_symbol="diamond",
-            marker_size=12
+            mode="markers", name="ALL Enter danger", marker_symbol="diamond", marker_size=12
         ))
     if exits_all:
         fig.add_trace(go.Scatter(
@@ -248,10 +260,7 @@ def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
                 t10y2y.loc[d] if (t10y2y is not None and d in getattr(t10y2y, "index", [])) else np.nan,
                 lei_yoy.loc[d] if (lei_yoy is not None and d in getattr(lei_yoy, "index", [])) else np.nan,
             ]) for d in exits_all],
-            mode="markers",
-            name="ALL Exit danger",
-            marker_symbol="diamond-open",
-            marker_size=12
+            mode="markers", name="ALL Exit danger", marker_symbol="diamond-open", marker_size=12
         ))
 
     fig.update_layout(
@@ -273,37 +282,30 @@ def compute_breach(latest_val, threshold, breach_if):
 
 st.set_page_config(page_title="Markets Stress Dashboard", layout="wide")
 st.title("Markets Stress Dashboard")
-st.caption("Credit Spreads • Yield Curve • Leading Indicator (OECD CLI YoY) • VIX table")
+st.caption("Credit Spreads • Yield Curve • Leading Indicator (OECD CLI YoY) • VIX")
 
-# API key resolution:
-# 1) Streamlit Secrets (hidden, preferred)
-# 2) ENV var
-# 3) Sidebar input (only if no key found)
+# API key resolution
 with st.sidebar:
     st.header("Settings")
 
-# Priority 1: Streamlit secrets (stay hidden; show a lock note only)
 if "FRED_API_KEY" in st.secrets:
     api_key = st.secrets["FRED_API_KEY"]
     with st.sidebar:
         st.success("FRED API Key loaded from secrets 🔒")
 else:
-    # Priority 2: environment var
     default_key = os.getenv("FRED_API_KEY", "")
-    # Only show an input if we still don't have a key
     with st.sidebar:
-        api_key = st.text_input(
-            "FRED API Key",
-            value=default_key,
-            type="password",
-            help="Get one free from fred.stlouisfed.org"
-        )
+        api_key = st.text_input("FRED API Key", value=default_key, type="password",
+                                help="Get one free from fred.stlouisfed.org")
 
 with st.sidebar:
-    # Time range: Past 1Y (default) or Custom
-    time_mode = st.radio("Time range", ["Past 1Y", "Custom range"], index=0, horizontal=False)
+    # Time range: presets or custom
+    time_mode = st.radio(
+        "Time range",
+        ["Past week", "Past month", "Past year", "Past 3 years", "Past 5 years", "Past 10 years", "Custom range"],
+        index=2
+    )
     if time_mode == "Custom range":
-        # Initialize session state for dates
         if "from_date" not in st.session_state:
             st.session_state.from_date = (pd.Timestamp.today() - pd.DateOffset(years=1)).date()
         if "to_date" not in st.session_state:
@@ -330,8 +332,7 @@ with st.sidebar:
     lei_yoy_thr = st.number_input("LEI/CLI YoY change danger below (%)", value=-0.5, step=0.1, format="%.2f")
     vix_thr = st.number_input("VIX danger above", value=30.0, step=1.0, format="%.0f")
 
-    st.checkbox("Include VIX in Combined view (overlay only)", value=False, key="include_vix_combined")
-    vix_thr = st.number_input("VIX danger above", value=25.0, step=1.0, format="%.1f")
+    include_vix_combined = st.checkbox("Include VIX in Combined view (overlay only)", value=False)
 
     st.subheader("Refresh")
     st.caption("Data is cached for 5 minutes. Click to fetch fresh data.")
@@ -348,17 +349,14 @@ if not api_key:
 # Data fetch
 # ---------------------------
 try:
-    # Credit spread: Moody's Baa minus 10Y Treasury (percentage points)
+    # Fetch series
     baa10y_raw = fetch_fred_series(api_key, "BAA10Y")
-    # Yield curve: 10Y minus 2Y Treasury (percentage points)
     t10y2y_raw = fetch_fred_series(api_key, "T10Y2Y")
-    # LEI (proxy): OECD CLI for the US (USALOLITOAASTSAM) level -> convert to YoY % change
-    lei_level_raw = fetch_fred_series(api_key, "USALOLITOAASTSAM")
+    lei_level_raw = fetch_fred_series(api_key, "USALOLITOAASTSAM")  # OECD CLI
     lei_yoy_raw = compute_lei_yoy(lei_level_raw)
-    # VIX (close)
     vix_raw = fetch_fred_series(api_key, "VIXCLS")
 
-    # Apply time range
+    # Apply range
     baa10y = filter_by_range(baa10y_raw, time_mode, from_date, to_date)
     t10y2y = filter_by_range(t10y2y_raw, time_mode, from_date, to_date)
     lei_yoy = filter_by_range(lei_yoy_raw, time_mode, from_date, to_date)
@@ -366,7 +364,7 @@ try:
 
     last_update = max(baa10y.index.max(), t10y2y.index.max(), lei_yoy.index.max(), vix.index.max())
 
-    # Latest values for risk summary (based on first three only)
+    # Overall Risk calc (3 indicators only)
     latest_credit = float(baa10y.iloc[-1]) if not baa10y.empty else float("nan")
     latest_yc = float(t10y2y.iloc[-1]) if not t10y2y.empty else float("nan")
     latest_lei = float(lei_yoy.iloc[-1]) if not lei_yoy.empty else float("nan")
@@ -383,7 +381,6 @@ try:
     else:
         risk_label, risk_color = "RISK", "#f59e0b"
 
-    # Render a top-level button-like badge
     st.markdown(
         f"""<div style="display:flex;justify-content:flex-start;gap:8px;align-items:center;margin-bottom:8px;">
         <button style="background:{risk_color};color:white;border:none;padding:8px 14px;border-radius:10px;font-weight:800;cursor:default;">
@@ -401,20 +398,8 @@ except Exception as e:
 view_mode = st.radio("View", ["Panels", "Combined"], index=0, horizontal=True)
 
 if view_mode == "Combined":
-    if st.session_state.get("include_vix_combined", False):
-        # render combined 3, then overlay VIX with purple and its threshold
-        plot_combined_view(baa10y, t10y2y, lei_yoy, credit_spread_thr, yield_curve_thr, lei_yoy_thr)
-        fig = st.session_state.get("_last_combined_fig")
-        # If we had stored the fig, we could extend it; since not, re-create a lightweight overlay plot
-        # Instead, draw an additional chart just for VIX overlay simplicity:
-        overlay = go.Figure()
-        if vix is not None and not vix.empty:
-            overlay.add_trace(go.Scatter(x=vix.index, y=vix.values, mode="lines", name="VIX (overlay)", line=dict(color="#9467bd")))
-            overlay.add_hline(y=vix_thr, line_dash="dash", line_color="#9467bd", annotation_text=f"VIX danger @ {vix_thr:g}", annotation_font_color="#9467bd")
-        overlay.update_layout(title="VIX Overlay", height=260, margin=dict(l=40, r=40, t=40, b=30), legend=dict(orientation="h"))
-        st.plotly_chart(overlay, use_container_width=True)
-    else:
-        plot_combined_view(baa10y, t10y2y, lei_yoy, credit_spread_thr, yield_curve_thr, lei_yoy_thr)
+    plot_combined_view(baa10y, t10y2y, lei_yoy, credit_spread_thr, yield_curve_thr, lei_yoy_thr,
+                       vix=vix, vix_thr=vix_thr, include_vix=include_vix_combined)
 else:
     col1, col2 = st.columns(2)
     col3 = st.container()
@@ -422,7 +407,6 @@ else:
     with col1:
         st.subheader("Credit Spread: Moody's Baa − 10Y Treasury")
         plot_indicator(baa10y, "Credit Spread (BAA10Y)", " ppts", credit_spread_thr, breach_if="above")
-        # Entry/Exit table
         b1 = breach_series(baa10y, credit_spread_thr, "above")
         e1, x1 = transitions(b1)
         if e1 or x1:
@@ -434,7 +418,6 @@ else:
     with col2:
         st.subheader("Yield Curve: 10Y − 2Y")
         plot_indicator(t10y2y, "Yield Curve (T10Y−2Y)", " ppts", yield_curve_thr, breach_if="below")
-        # Entry/Exit table
         b2 = breach_series(t10y2y, yield_curve_thr, "below")
         e2, x2 = transitions(b2)
         if e2 or x2:
@@ -444,20 +427,17 @@ else:
             st.dataframe(df2, use_container_width=True)
 
     with col3:
-    st.subheader("Leading Indicator (OECD CLI) — YoY change")
-    plot_indicator(lei_yoy, "OECD CLI YoY % (USALOLITOAASTSAM)", " %", lei_yoy_thr, breach_if="below")
-    # Entry/Exit table
-    b3 = breach_series(lei_yoy, lei_yoy_thr, "below")
-    e3, x3 = transitions(b3)
-    if e3 or x3:
-        df3 = pd.DataFrame({"Type": ["Enter"]*len(e3) + ["Exit"]*len(x3),
-                            "Date": list(e3) + list(x3)}).sort_values("Date").reset_index(drop=True)
-        st.caption("OECD CLI YoY — danger entry/exit points")
-        st.dataframe(df3, use_container_width=True)
+        st.subheader("Leading Indicator (OECD CLI) — YoY change")
+        plot_indicator(lei_yoy, "OECD CLI YoY % (USALOLITOAASTSAM)", " %", lei_yoy_thr, breach_if="below")
+        b3 = breach_series(lei_yoy, lei_yoy_thr, "below")
+        e3, x3 = transitions(b3)
+        if e3 or x3:
+            df3 = pd.DataFrame({"Type": ["Enter"]*len(e3) + ["Exit"]*len(x3),
+                                "Date": list(e3) + list(x3)}).sort_values("Date").reset_index(drop=True)
+            st.caption("OECD CLI YoY — danger entry/exit points")
+            st.dataframe(df3, use_container_width=True)
 
-# VIX panel
-col4 = st.container()
-with col4:
+    # VIX panel
     st.subheader("VIX — CBOE Volatility Index")
     plot_indicator(vix, "VIX (VIXCLS)", " index", vix_thr, breach_if="above")
     b4 = breach_series(vix, vix_thr, "above")
@@ -467,22 +447,6 @@ with col4:
                             "Date": list(e4) + list(x4)}).sort_values("Date").reset_index(drop=True)
         st.caption("VIX — danger entry/exit points")
         st.dataframe(df4, use_container_width=True)
-
-# --- VIX table (no chart, as requested) ---
-st.subheader("VIX — danger entry/exit points")
-if vix is not None and not vix.empty:
-    b_vix = breach_series(vix, vix_thr, "above")
-    e_vix, x_vix = transitions(b_vix)
-    latest_vix = float(vix.iloc[-1])
-    st.caption(f"Latest VIX: {latest_vix:.2f}")
-    if e_vix or x_vix:
-        df_vix = pd.DataFrame({"Type": ["Enter"]*len(e_vix) + ["Exit"]*len(x_vix),
-                               "Date": list(e_vix) + list(x_vix)}).sort_values("Date").reset_index(drop=True)
-        st.dataframe(df_vix, use_container_width=True)
-    else:
-        st.info("No VIX danger entries/exits in the selected window.")
-else:
-    st.warning("No VIX data available in the selected range.")
 
 st.caption(f"Last data point across series: {last_update.date()} • Source: FRED (BAA10Y, T10Y2Y, USALOLITOAASTSAM, VIXCLS)")
 st.caption("Note: LEI proxy uses OECD Composite Leading Indicator for the US (USALOLITOAASTSAM). The Conference Board LEI is proprietary.")
