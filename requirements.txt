@@ -1,0 +1,6 @@
+streamlit==1.39.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.20.0
+fredapi>=0.5.1
+python-dotenv>=1.0.0
