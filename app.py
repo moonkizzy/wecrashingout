@@ -158,8 +158,8 @@ try:
     t10y2y = fetch_fred_series(api_key, "T10Y2Y")
     t10y2y = trim_window(t10y2y, window)
 
-    # LEI (proxy): Leading Index for the US (USSLIND) level -> convert to YoY % change
-    lei_level = fetch_fred_series(api_key, "USSLIND")
+    # LEI (proxy): OECD Composite Leading Indicator for US (USALOLITOAASTSAM) -> convert to YoY % change
+    lei_level = fetch_fred_series(api_key, "USALOLITOAASTSAM")
     lei_yoy = compute_lei_yoy(lei_level)
     lei_yoy = trim_window(lei_yoy, window)
 
@@ -181,8 +181,8 @@ with col2:
     plot_indicator(t10y2y, "Yield Curve (T10Y−2Y)", " ppts", yield_curve_thr, breach_if="below")
 
 with col3:
-    st.subheader("Leading Economic Index — YoY change")
-    plot_indicator(lei_yoy, "LEI YoY % (from USSLIND)", " %", lei_yoy_thr, breach_if="below")
+    st.subheader("Leading Indicator (OECD CLI) — YoY change")
+    plot_indicator(lei_yoy, "OECD CLI YoY % (USALOLITOAASTSAM)", " %", lei_yoy_thr, breach_if="below")
 
-st.caption(f"Last data point across series: {last_update.date()} • Source: FRED (BAA10Y, T10Y2Y, USSLIND)")
-st.caption("Note: LEI here uses the Federal Reserve's 'Leading Index for the United States (USSLIND)' as a proxy for the Conference Board LEI.")
+st.caption(f"Last data point across series: {last_update.date()} • Source: FRED (BAA10Y, T10Y2Y, USALOLITOAASTSAM)")
+st.caption("Note: LEI proxy now uses OECD Composite Leading Indicator for the US (series USALOLITOAASTSAM on FRED). The Conference Board LEI is proprietary; swap it in if you have access.")
