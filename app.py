@@ -328,6 +328,9 @@ with st.sidebar:
     credit_spread_thr = st.number_input("Credit Spread (BAA - 10Y) danger above", value=2.5, step=0.1, format="%.2f")
     yield_curve_thr = st.number_input("Yield Curve (10Y - 2Y) danger below", value=0.0, step=0.1, format="%.2f")
     lei_yoy_thr = st.number_input("LEI/CLI YoY change danger below (%)", value=-0.5, step=0.1, format="%.2f")
+    vix_thr = st.number_input("VIX danger above", value=30.0, step=1.0, format="%.0f")
+
+    st.checkbox("Include VIX in Combined view (overlay only)", value=False, key="include_vix_combined")
     vix_thr = st.number_input("VIX danger above", value=25.0, step=1.0, format="%.1f")
 
     st.subheader("Refresh")
@@ -398,7 +401,20 @@ except Exception as e:
 view_mode = st.radio("View", ["Panels", "Combined"], index=0, horizontal=True)
 
 if view_mode == "Combined":
-    plot_combined_view(baa10y, t10y2y, lei_yoy, credit_spread_thr, yield_curve_thr, lei_yoy_thr)
+    if st.session_state.get("include_vix_combined", False):
+        # render combined 3, then overlay VIX with purple and its threshold
+        plot_combined_view(baa10y, t10y2y, lei_yoy, credit_spread_thr, yield_curve_thr, lei_yoy_thr)
+        fig = st.session_state.get("_last_combined_fig")
+        # If we had stored the fig, we could extend it; since not, re-create a lightweight overlay plot
+        # Instead, draw an additional chart just for VIX overlay simplicity:
+        overlay = go.Figure()
+        if vix is not None and not vix.empty:
+            overlay.add_trace(go.Scatter(x=vix.index, y=vix.values, mode="lines", name="VIX (overlay)", line=dict(color="#9467bd")))
+            overlay.add_hline(y=vix_thr, line_dash="dash", line_color="#9467bd", annotation_text=f"VIX danger @ {vix_thr:g}", annotation_font_color="#9467bd")
+        overlay.update_layout(title="VIX Overlay", height=260, margin=dict(l=40, r=40, t=40, b=30), legend=dict(orientation="h"))
+        st.plotly_chart(overlay, use_container_width=True)
+    else:
+        plot_combined_view(baa10y, t10y2y, lei_yoy, credit_spread_thr, yield_curve_thr, lei_yoy_thr)
 else:
     col1, col2 = st.columns(2)
     col3 = st.container()
@@ -428,16 +444,29 @@ else:
             st.dataframe(df2, use_container_width=True)
 
     with col3:
-        st.subheader("Leading Indicator (OECD CLI) — YoY change")
-        plot_indicator(lei_yoy, "OECD CLI YoY % (USALOLITOAASTSAM)", " %", lei_yoy_thr, breach_if="below")
-        # Entry/Exit table
-        b3 = breach_series(lei_yoy, lei_yoy_thr, "below")
-        e3, x3 = transitions(b3)
-        if e3 or x3:
-            df3 = pd.DataFrame({"Type": ["Enter"]*len(e3) + ["Exit"]*len(x3),
-                                "Date": list(e3) + list(x3)}).sort_values("Date").reset_index(drop=True)
-            st.caption("OECD CLI YoY — danger entry/exit points")
-            st.dataframe(df3, use_container_width=True)
+    st.subheader("Leading Indicator (OECD CLI) — YoY change")
+    plot_indicator(lei_yoy, "OECD CLI YoY % (USALOLITOAASTSAM)", " %", lei_yoy_thr, breach_if="below")
+    # Entry/Exit table
+    b3 = breach_series(lei_yoy, lei_yoy_thr, "below")
+    e3, x3 = transitions(b3)
+    if e3 or x3:
+        df3 = pd.DataFrame({"Type": ["Enter"]*len(e3) + ["Exit"]*len(x3),
+                            "Date": list(e3) + list(x3)}).sort_values("Date").reset_index(drop=True)
+        st.caption("OECD CLI YoY — danger entry/exit points")
+        st.dataframe(df3, use_container_width=True)
+
+# VIX panel
+col4 = st.container()
+with col4:
+    st.subheader("VIX — CBOE Volatility Index")
+    plot_indicator(vix, "VIX (VIXCLS)", " index", vix_thr, breach_if="above")
+    b4 = breach_series(vix, vix_thr, "above")
+    e4, x4 = transitions(b4)
+    if e4 or x4:
+        df4 = pd.DataFrame({"Type": ["Enter"]*len(e4) + ["Exit"]*len(x4),
+                            "Date": list(e4) + list(x4)}).sort_values("Date").reset_index(drop=True)
+        st.caption("VIX — danger entry/exit points")
+        st.dataframe(df4, use_container_width=True)
 
 # --- VIX table (no chart, as requested) ---
 st.subheader("VIX — danger entry/exit points")
