@@ -1,13 +1,14 @@
 # app.py
-# Markets Stress Dashboard — Credit Spreads, Yield Curve, and Leading Indicator (OECD CLI)
+# Markets Stress Dashboard — Credit Spreads, Yield Curve, Leading Indicator (OECD CLI), and VIX table
 # Features:
-# - FRED API (BAA10Y, T10Y2Y, USALOLITOAASTSAM)
+# - FRED API (BAA10Y, T10Y2Y, USALOLITOAASTSAM, VIXCLS)
 # - Danger threshold lines (red in panel views; distinct per-series colors in combined view)
 # - Time range: default Past 1Y, or Custom range with From/To and "Set To Today" button
-# - Overall Risk badge (OK / RISK / DANGER)
+# - Overall Risk badge (OK / RISK / DANGER) based on the first three indicators
 # - Panels and Combined view
 # - Entry/Exit markers and tables
 # - Shaded background during danger periods (per panel; and "ALL danger" in combined view)
+# - Additional VIX table with danger entry/exit detection
 
 import os
 from datetime import date
@@ -272,7 +273,7 @@ def compute_breach(latest_val, threshold, breach_if):
 
 st.set_page_config(page_title="Markets Stress Dashboard", layout="wide")
 st.title("Markets Stress Dashboard")
-st.caption("Credit Spreads • Yield Curve • Leading Indicator (OECD CLI YoY)")
+st.caption("Credit Spreads • Yield Curve • Leading Indicator (OECD CLI YoY) • VIX table")
 
 # API key resolution:
 # 1) Streamlit Secrets (hidden, preferred)
@@ -327,6 +328,7 @@ with st.sidebar:
     credit_spread_thr = st.number_input("Credit Spread (BAA - 10Y) danger above", value=2.5, step=0.1, format="%.2f")
     yield_curve_thr = st.number_input("Yield Curve (10Y - 2Y) danger below", value=0.0, step=0.1, format="%.2f")
     lei_yoy_thr = st.number_input("LEI/CLI YoY change danger below (%)", value=-0.5, step=0.1, format="%.2f")
+    vix_thr = st.number_input("VIX danger above", value=25.0, step=1.0, format="%.1f")
 
     st.subheader("Refresh")
     st.caption("Data is cached for 5 minutes. Click to fetch fresh data.")
@@ -350,15 +352,18 @@ try:
     # LEI (proxy): OECD CLI for the US (USALOLITOAASTSAM) level -> convert to YoY % change
     lei_level_raw = fetch_fred_series(api_key, "USALOLITOAASTSAM")
     lei_yoy_raw = compute_lei_yoy(lei_level_raw)
+    # VIX (close)
+    vix_raw = fetch_fred_series(api_key, "VIXCLS")
 
     # Apply time range
     baa10y = filter_by_range(baa10y_raw, time_mode, from_date, to_date)
     t10y2y = filter_by_range(t10y2y_raw, time_mode, from_date, to_date)
     lei_yoy = filter_by_range(lei_yoy_raw, time_mode, from_date, to_date)
+    vix = filter_by_range(vix_raw, time_mode, from_date, to_date)
 
-    last_update = max(baa10y.index.max(), t10y2y.index.max(), lei_yoy.index.max())
+    last_update = max(baa10y.index.max(), t10y2y.index.max(), lei_yoy.index.max(), vix.index.max())
 
-    # Latest values for risk summary
+    # Latest values for risk summary (based on first three only)
     latest_credit = float(baa10y.iloc[-1]) if not baa10y.empty else float("nan")
     latest_yc = float(t10y2y.iloc[-1]) if not t10y2y.empty else float("nan")
     latest_lei = float(lei_yoy.iloc[-1]) if not lei_yoy.empty else float("nan")
@@ -434,5 +439,21 @@ else:
             st.caption("OECD CLI YoY — danger entry/exit points")
             st.dataframe(df3, use_container_width=True)
 
-st.caption(f"Last data point across series: {last_update.date()} • Source: FRED (BAA10Y, T10Y2Y, USALOLITOAASTSAM)")
+# --- VIX table (no chart, as requested) ---
+st.subheader("VIX — danger entry/exit points")
+if vix is not None and not vix.empty:
+    b_vix = breach_series(vix, vix_thr, "above")
+    e_vix, x_vix = transitions(b_vix)
+    latest_vix = float(vix.iloc[-1])
+    st.caption(f"Latest VIX: {latest_vix:.2f}")
+    if e_vix or x_vix:
+        df_vix = pd.DataFrame({"Type": ["Enter"]*len(e_vix) + ["Exit"]*len(x_vix),
+                               "Date": list(e_vix) + list(x_vix)}).sort_values("Date").reset_index(drop=True)
+        st.dataframe(df_vix, use_container_width=True)
+    else:
+        st.info("No VIX danger entries/exits in the selected window.")
+else:
+    st.warning("No VIX data available in the selected range.")
+
+st.caption(f"Last data point across series: {last_update.date()} • Source: FRED (BAA10Y, T10Y2Y, USALOLITOAASTSAM, VIXCLS)")
 st.caption("Note: LEI proxy uses OECD Composite Leading Indicator for the US (USALOLITOAASTSAM). The Conference Board LEI is proprietary.")
