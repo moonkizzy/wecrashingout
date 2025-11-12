@@ -1,13 +1,17 @@
 # app.py
-# Streamlit dashboard: Credit Spreads, Yield Curve, and LEI (with danger thresholds)
+# Markets Stress Dashboard — Credit Spreads, Yield Curve, and Leading Indicator (OECD CLI)
+# Features:
+# - Uses FRED API (BAA10Y, T10Y2Y, USALOLITOAASTSAM)
+# - Danger threshold lines (red in panel views; distinct per-series colors in combined view)
+# - Time range: default Past 1Y, or Custom range with From/To date pickers and "Set To Today" button
+# - Overall Risk badge (OK / RISK / DANGER)
+# - Hides API key input when using Streamlit Secrets
+
 import os
-from datetime import datetime, timedelta
-import pandas as pd
 import numpy as np
+import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-
-# Optional dependency (installed via requirements): fredapi
 from fredapi import Fred
 
 # ---------------------------
@@ -25,7 +29,6 @@ def fetch_fred_series(api_key: str, series_id: str) -> pd.Series:
 
 def trim_window(s: pd.Series, window_label: str) -> pd.Series:
     # (kept for backward-compatibility; not used when custom range is selected)
-
     if window_label == "Max":
         return s
     now = s.index.max()
@@ -33,10 +36,9 @@ def trim_window(s: pd.Series, window_label: str) -> pd.Series:
     start = now - pd.DateOffset(years=years)
     return s.loc[s.index >= start]
 
-
 def filter_by_range(s: pd.Series, mode: str, start_dt=None, end_dt=None) -> pd.Series:
     """Filter a time series by either 'Past 1Y' or custom [start_dt, end_dt]."""
-    if s.empty:
+    if s is None or s.empty:
         return s
     if mode == "Past 1Y":
         end = s.index.max()
@@ -46,20 +48,25 @@ def filter_by_range(s: pd.Series, mode: str, start_dt=None, end_dt=None) -> pd.S
     if start_dt is None and end_dt is None:
         return s
     # Convert date inputs to Timestamps
-    if start_dt is not None:
-        start_ts = pd.Timestamp(start_dt)
-    else:
-        start_ts = s.index.min()
-    if end_dt is not None:
-        # include end date by adding 1 day then using '<'
-        end_ts = pd.Timestamp(end_dt) + pd.Timedelta(days=1)
-    else:
-        end_ts = s.index.max() + pd.Timedelta(days=1)
+    start_ts = pd.Timestamp(start_dt) if start_dt is not None else s.index.min()
+    # include end date by adding 1 day then using '<'
+    end_ts = (pd.Timestamp(end_dt) + pd.Timedelta(days=1)) if end_dt is not None else (s.index.max() + pd.Timedelta(days=1))
     return s.loc[(s.index >= start_ts) & (s.index < end_ts)]
+
+def compute_lei_yoy(lei_level: pd.Series) -> pd.Series:
+    """YoY % change from levels (12-month percent change)."""
+    lei_yoy = lei_level.pct_change(12) * 100.0
+    lei_yoy.name = "LEI YoY %"
+    return lei_yoy.dropna()
+
 def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breach_if: str):
     """
     breach_if: 'above' or 'below'
     """
+    if s is None or s.empty:
+        st.warning(f"No data available for {title}.")
+        return
+
     latest_ts = s.index.max()
     latest_val = float(s.loc[latest_ts])
 
@@ -109,13 +116,47 @@ def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breac
     )
     st.plotly_chart(fig, use_container_width=True)
 
+# Combined view plotting
+def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
+                       thr_credit: float, thr_yc: float, thr_lei: float):
+    fig = go.Figure()
 
-def compute_lei_yoy(lei_level: pd.Series) -> pd.Series:
-    """YoY % change from levels (12-month percent change)."""
-    lei_yoy = lei_level.pct_change(12) * 100.0
-    lei_yoy.name = "LEI YoY %"
-    return lei_yoy.dropna()
+    # Distinct colors for series
+    color_credit = "#1f77b4"  # blue
+    color_yc = "#2ca02c"      # green
+    color_lei = "#ff7f0e"     # orange
 
+    # Add series (only if non-empty)
+    if baa10y is not None and not baa10y.empty:
+        fig.add_trace(go.Scatter(x=baa10y.index, y=baa10y.values, mode="lines",
+                                 name="Credit Spread (BAA10Y)", line=dict(color=color_credit)))
+        fig.add_hline(y=thr_credit, line_dash="dash", line_color=color_credit,
+                      annotation_text=f"Credit danger @ {thr_credit:g}", annotation_font_color=color_credit)
+
+    if t10y2y is not None and not t10y2y.empty:
+        fig.add_trace(go.Scatter(x=t10y2y.index, y=t10y2y.values, mode="lines",
+                                 name="Yield Curve (T10Y−2Y)", line=dict(color=color_yc)))
+        fig.add_hline(y=thr_yc, line_dash="dash", line_color=color_yc,
+                      annotation_text=f"YieldCurve danger @ {thr_yc:g}", annotation_font_color=color_yc)
+
+    if lei_yoy is not None and not lei_yoy.empty:
+        fig.add_trace(go.Scatter(x=lei_yoy.index, y=lei_yoy.values, mode="lines",
+                                 name="OECD CLI YoY %", line=dict(color=color_lei)))
+        fig.add_hline(y=thr_lei, line_dash="dash", line_color=color_lei,
+                      annotation_text=f"CLI YoY danger @ {thr_lei:g}%", annotation_font_color=color_lei)
+
+    fig.update_layout(
+        title="Combined View — All Indicators",
+        margin=dict(l=40, r=40, t=60, b=40),
+        height=520,
+        xaxis_title="Date",
+        yaxis_title="Value / %",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def compute_breach(latest_val, threshold, breach_if):
+    return (latest_val >= threshold) if breach_if == "above" else (latest_val <= threshold)
 
 # ---------------------------
 # UI
@@ -123,7 +164,7 @@ def compute_lei_yoy(lei_level: pd.Series) -> pd.Series:
 
 st.set_page_config(page_title="Markets Stress Dashboard", layout="wide")
 st.title("Markets Stress Dashboard")
-st.caption("Credit Spreads • Yield Curve • Leading Economic Index (YoY)")
+st.caption("Credit Spreads • Yield Curve • Leading Indicator (OECD CLI YoY)")
 
 # API key resolution:
 # 1) Streamlit Secrets (hidden, preferred)
@@ -150,6 +191,7 @@ else:
         )
 
 with st.sidebar:
+    # Time range: Past 1Y (default) or Custom
     time_mode = st.radio("Time range", ["Past 1Y", "Custom range"], index=0, horizontal=False)
     if time_mode == "Custom range":
         # Initialize session state for dates
@@ -175,7 +217,7 @@ with st.sidebar:
     st.subheader("Danger Thresholds")
     credit_spread_thr = st.number_input("Credit Spread (BAA - 10Y) danger above", value=2.5, step=0.1, format="%.2f")
     yield_curve_thr = st.number_input("Yield Curve (10Y - 2Y) danger below", value=0.0, step=0.1, format="%.2f")
-    lei_yoy_thr = st.number_input("LEI YoY change danger below (%)", value=-0.5, step=0.1, format="%.2f")
+    lei_yoy_thr = st.number_input("LEI/CLI YoY change danger below (%)", value=-0.5, step=0.1, format="%.2f")
 
     st.subheader("Refresh")
     st.caption("Data is cached for 5 minutes. Click to fetch fresh data.")
@@ -187,9 +229,6 @@ with st.sidebar:
 if not api_key:
     st.warning("Enter your FRED API key (or add it to Streamlit Secrets) to load data.")
     st.stop()
-
-col1, col2 = st.columns(2)
-col3 = st.container()
 
 # ---------------------------
 # Data fetch
@@ -210,86 +249,57 @@ try:
 
     last_update = max(baa10y.index.max(), t10y2y.index.max(), lei_yoy.index.max())
 
-# Latest values for risk summary
-latest_credit = float(baa10y.iloc[-1]) if not baa10y.empty else float("nan")
-latest_yc = float(t10y2y.iloc[-1]) if not t10y2y.empty else float("nan")
-latest_lei = float(lei_yoy.iloc[-1]) if not lei_yoy.empty else float("nan")
+    # Latest values for risk summary
+    latest_credit = float(baa10y.iloc[-1]) if not baa10y.empty else float("nan")
+    latest_yc = float(t10y2y.iloc[-1]) if not t10y2y.empty else float("nan")
+    latest_lei = float(lei_yoy.iloc[-1]) if not lei_yoy.empty else float("nan")
 
-breach_credit = compute_breach(latest_credit, credit_spread_thr, "above") if not np.isnan(latest_credit) else False
-breach_yc = compute_breach(latest_yc, yield_curve_thr, "below") if not np.isnan(latest_yc) else False
-breach_lei = compute_breach(latest_lei, lei_yoy_thr, "below") if not np.isnan(latest_lei) else False
-num_breaches = int(breach_credit) + int(breach_yc) + int(breach_lei)
+    breach_credit = compute_breach(latest_credit, credit_spread_thr, "above") if not np.isnan(latest_credit) else False
+    breach_yc = compute_breach(latest_yc, yield_curve_thr, "below") if not np.isnan(latest_yc) else False
+    breach_lei = compute_breach(latest_lei, lei_yoy_thr, "below") if not np.isnan(latest_lei) else False
+    num_breaches = int(breach_credit) + int(breach_yc) + int(breach_lei)
 
-if num_breaches == 0:
-    risk_label, risk_color = "OK", "#10b981"
-elif num_breaches == 3:
-    risk_label, risk_color = "DANGER", "#ef4444"
-else:
-    risk_label, risk_color = "RISK", "#f59e0b"
+    if num_breaches == 0:
+        risk_label, risk_color = "OK", "#10b981"
+    elif num_breaches == 3:
+        risk_label, risk_color = "DANGER", "#ef4444"
+    else:
+        risk_label, risk_color = "RISK", "#f59e0b"
 
-# Render a top-level button-like badge
-st.markdown(
-    f"""<div style=\"display:flex;justify-content:flex-start;gap:8px;align-items:center;margin-bottom:8px;\"><button style=\"background:{risk_color};color:white;border:none;padding:8px 14px;border-radius:10px;font-weight:800;cursor:default;\">Overall Risk: {risk_label}</button></div>""",
-    unsafe_allow_html=True
-)
+    # Render a top-level button-like badge
+    st.markdown(
+        f"""<div style="display:flex;justify-content:flex-start;gap:8px;align-items:center;margin-bottom:8px;">
+        <button style="background:{risk_color};color:white;border:none;padding:8px 14px;border-radius:10px;font-weight:800;cursor:default;">
+        Overall Risk: {risk_label}</button></div>""",
+        unsafe_allow_html=True
+    )
+
 except Exception as e:
     st.error(f"Error fetching data: {e}")
     st.stop()
 
 # ---------------------------
-# Overall Risk (computed from latest values vs thresholds)
-# ---------------------------
-def compute_breach(latest_val, threshold, breach_if):
-    return (latest_val >= threshold) if breach_if == "above" else (latest_val <= threshold)
-
-
-# Combined view plotting
-def plot_combined_view(baa10y: pd.Series, t10y2y: pd.Series, lei_yoy: pd.Series,
-                       thr_credit: float, thr_yc: float, thr_lei: float):
-    fig = go.Figure()
-
-    # Distinct colors for series
-    color_credit = "#1f77b4"  # blue
-    color_yc = "#2ca02c"      # green
-    color_lei = "#ff7f0e"     # orange
-
-    # Series traces
-    fig.add_trace(go.Scatter(x=baa10y.index, y=baa10y.values, mode="lines", name="Credit Spread (BAA10Y)", line=dict(color=color_credit)))
-    fig.add_trace(go.Scatter(x=t10y2y.index, y=t10y2y.values, mode="lines", name="Yield Curve (T10Y−2Y)", line=dict(color=color_yc)))
-    fig.add_trace(go.Scatter(x=lei_yoy.index, y=lei_yoy.values, mode="lines", name="OECD CLI YoY %", line=dict(color=color_lei)))
-
-    # Threshold lines with distinct colors
-    fig.add_hline(y=thr_credit, line_dash="dash", line_color=color_credit, annotation_text=f"Credit danger @ {thr_credit:g}", annotation_font_color=color_credit)
-    fig.add_hline(y=thr_yc, line_dash="dash", line_color=color_yc, annotation_text=f"YieldCurve danger @ {thr_yc:g}", annotation_font_color=color_yc)
-    fig.add_hline(y=thr_lei, line_dash="dash", line_color=color_lei, annotation_text=f"CLI YoY danger @ {thr_lei:g}%", annotation_font_color=color_lei)
-
-    fig.update_layout(
-        title="Combined View — All Indicators",
-        margin=dict(l=40, r=40, t=60, b=40),
-        height=520,
-        xaxis_title="Date",
-        yaxis_title="Value / %",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-# ---------------------------
 # Render
 # ---------------------------
-
 view_mode = st.radio("View", ["Panels", "Combined"], index=0, horizontal=True)
+
 if view_mode == "Combined":
     plot_combined_view(baa10y, t10y2y, lei_yoy, credit_spread_thr, yield_curve_thr, lei_yoy_thr)
 else:
+    col1, col2 = st.columns(2)
+    col3 = st.container()
+
     with col1:
         st.subheader("Credit Spread: Moody's Baa − 10Y Treasury")
         plot_indicator(baa10y, "Credit Spread (BAA10Y)", " ppts", credit_spread_thr, breach_if="above")
+
     with col2:
         st.subheader("Yield Curve: 10Y − 2Y")
         plot_indicator(t10y2y, "Yield Curve (T10Y−2Y)", " ppts", yield_curve_thr, breach_if="below")
+
     with col3:
         st.subheader("Leading Indicator (OECD CLI) — YoY change")
         plot_indicator(lei_yoy, "OECD CLI YoY % (USALOLITOAASTSAM)", " %", lei_yoy_thr, breach_if="below")
 
 st.caption(f"Last data point across series: {last_update.date()} • Source: FRED (BAA10Y, T10Y2Y, USALOLITOAASTSAM)")
-st.caption("Note: LEI proxy now uses OECD Composite Leading Indicator for the US (series USALOLITOAASTSAM on FRED). The Conference Board LEI is proprietary; swap it in if you have access.")
+st.caption("Note: LEI proxy uses OECD Composite Leading Indicator for the US (USALOLITOAASTSAM). The Conference Board LEI is proprietary.")
