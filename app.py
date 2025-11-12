@@ -44,8 +44,15 @@ def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breac
     # Build plotly chart
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name=title))
-    # Add horizontal danger line
-    fig.add_hline(y=threshold, line_dash="dash", annotation_text=f"Danger @ {threshold:g} {units}", annotation_position="top left")
+    # Add horizontal danger line (red)
+    fig.add_hline(
+        y=threshold,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=f"Danger @ {threshold:g} {units}",
+        annotation_position="top left",
+        annotation_font_color="red"
+    )
 
     # Add last-point marker
     fig.add_trace(go.Scatter(
@@ -93,14 +100,31 @@ st.set_page_config(page_title="Markets Stress Dashboard", layout="wide")
 st.title("Markets Stress Dashboard")
 st.caption("Credit Spreads • Yield Curve • Leading Economic Index (YoY)")
 
-# API key resolution: Streamlit secrets > ENV > sidebar input
-default_key = os.getenv("FRED_API_KEY", None)
-if "FRED_API_KEY" in st.secrets:
-    default_key = st.secrets["FRED_API_KEY"]
-
+# API key resolution:
+# 1) Streamlit Secrets (hidden, preferred)
+# 2) ENV var
+# 3) Sidebar input (only if no key found)
 with st.sidebar:
     st.header("Settings")
-    api_key = st.text_input("FRED API Key", value=default_key or "", type="password", help="Get one free from fred.stlouisfed.org")
+
+# Priority 1: Streamlit secrets (stay hidden; show a lock note only)
+if "FRED_API_KEY" in st.secrets:
+    api_key = st.secrets["FRED_API_KEY"]
+    with st.sidebar:
+        st.success("FRED API Key loaded from secrets 🔒")
+else:
+    # Priority 2: environment var
+    default_key = os.getenv("FRED_API_KEY", "")
+    # Only show an input if we still don't have a key
+    with st.sidebar:
+        api_key = st.text_input(
+            "FRED API Key",
+            value=default_key,
+            type="password",
+            help="Get one free from fred.stlouisfed.org"
+        )
+
+with st.sidebar:
     window = st.selectbox("Chart window", ["2Y", "1Y", "3Y", "5Y", "Max"], index=0)
 
     st.subheader("Danger Thresholds")
@@ -116,7 +140,7 @@ with st.sidebar:
         st.rerun()
 
 if not api_key:
-    st.warning("Enter your FRED API key in the sidebar to load data.")
+    st.warning("Enter your FRED API key (or add it to Streamlit Secrets) to load data.")
     st.stop()
 
 col1, col2 = st.columns(2)
