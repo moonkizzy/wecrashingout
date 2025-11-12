@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from fredapi import Fred
+from datetime import date
 
 # ---------------------------
 # Helpers
@@ -200,14 +201,15 @@ with st.sidebar:
         if "to_date" not in st.session_state:
             st.session_state.to_date = pd.Timestamp.today().date()
 
-        from_date = st.date_input("From", value=st.session_state.from_date, key="from_date")
         cols = st.columns([3,2])
+        with cols[1]:
+            def _set_to_today():
+                st.session_state.to_date = date.today()
+            st.button("Set To Today", on_click=_set_to_today)
         with cols[0]:
             to_date = st.date_input("To", value=st.session_state.to_date, key="to_date")
-        with cols[1]:
-            if st.button("Set To Today"):
-                st.session_state.to_date = pd.Timestamp.today().date()
-                st.rerun()
+
+        from_date = st.date_input("From", value=st.session_state.from_date, key="from_date")
 
         if from_date > to_date:
             st.warning("`From` is after `To`. Please adjust.")
