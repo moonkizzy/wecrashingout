@@ -24,6 +24,8 @@ def fetch_fred_series(api_key: str, series_id: str) -> pd.Series:
     return s
 
 def trim_window(s: pd.Series, window_label: str) -> pd.Series:
+    # (kept for backward-compatibility; not used when custom range is selected)
+
     if window_label == "Max":
         return s
     now = s.index.max()
@@ -31,6 +33,29 @@ def trim_window(s: pd.Series, window_label: str) -> pd.Series:
     start = now - pd.DateOffset(years=years)
     return s.loc[s.index >= start]
 
+
+def filter_by_range(s: pd.Series, mode: str, start_dt=None, end_dt=None) -> pd.Series:
+    """Filter a time series by either 'Past 1Y' or custom [start_dt, end_dt]."""
+    if s.empty:
+        return s
+    if mode == "Past 1Y":
+        end = s.index.max()
+        start = end - pd.DateOffset(years=1)
+        return s.loc[(s.index >= start) & (s.index <= end)]
+    # Custom range
+    if start_dt is None and end_dt is None:
+        return s
+    # Convert date inputs to Timestamps
+    if start_dt is not None:
+        start_ts = pd.Timestamp(start_dt)
+    else:
+        start_ts = s.index.min()
+    if end_dt is not None:
+        # include end date by adding 1 day then using '<'
+        end_ts = pd.Timestamp(end_dt) + pd.Timedelta(days=1)
+    else:
+        end_ts = s.index.max() + pd.Timedelta(days=1)
+    return s.loc[(s.index >= start_ts) & (s.index < end_ts)]
 def plot_indicator(s: pd.Series, title: str, units: str, threshold: float, breach_if: str):
     """
     breach_if: 'above' or 'below'
@@ -125,7 +150,14 @@ else:
         )
 
 with st.sidebar:
-    window = st.selectbox("Chart window", ["2Y", "1Y", "3Y", "5Y", "Max"], index=0)
+    time_mode = st.radio("Time range", ["Past 1Y", "Custom range"], index=0, horizontal=False)
+    if time_mode == "Custom range":
+        from_date = st.date_input("From", value=(pd.Timestamp.today() - pd.DateOffset(years=1)).date())
+        to_date = st.date_input("To", value=pd.Timestamp.today().date())
+        if from_date > to_date:
+            st.warning("`From` is after `To`. Please adjust.")
+    else:
+        from_date, to_date = None, None
 
     st.subheader("Danger Thresholds")
     credit_spread_thr = st.number_input("Credit Spread (BAA - 10Y) danger above", value=2.5, step=0.1, format="%.2f")
@@ -151,17 +183,17 @@ col3 = st.container()
 # ---------------------------
 try:
     # Credit spread: Moody's Baa minus 10Y Treasury (percentage points)
-    baa10y = fetch_fred_series(api_key, "BAA10Y")
-    baa10y = trim_window(baa10y, window)
-
+    baa10y_raw = fetch_fred_series(api_key, "BAA10Y")
     # Yield curve: 10Y minus 2Y Treasury (percentage points)
-    t10y2y = fetch_fred_series(api_key, "T10Y2Y")
-    t10y2y = trim_window(t10y2y, window)
+    t10y2y_raw = fetch_fred_series(api_key, "T10Y2Y")
+    # LEI (proxy): OECD CLI for the US (USALOLITOAASTSAM) level -> convert to YoY % change
+    lei_level_raw = fetch_fred_series(api_key, "USALOLITOAASTSAM")
+    lei_yoy_raw = compute_lei_yoy(lei_level_raw)
 
-    # LEI (proxy): OECD Composite Leading Indicator for US (USALOLITOAASTSAM) -> convert to YoY % change
-    lei_level = fetch_fred_series(api_key, "USALOLITOAASTSAM")
-    lei_yoy = compute_lei_yoy(lei_level)
-    lei_yoy = trim_window(lei_yoy, window)
+    # Apply time range
+    baa10y = filter_by_range(baa10y_raw, time_mode, from_date, to_date)
+    t10y2y = filter_by_range(t10y2y_raw, time_mode, from_date, to_date)
+    lei_yoy = filter_by_range(lei_yoy_raw, time_mode, from_date, to_date)
 
     last_update = max(baa10y.index.max(), t10y2y.index.max(), lei_yoy.index.max())
 except Exception as e:
