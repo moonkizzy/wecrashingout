@@ -35,7 +35,7 @@ if not api_key:
 fred = Fred(api_key=api_key)
 
 @st.cache_data(ttl=600)
-def get_data():
+def wcget_data():
     # Fetching core series
     data = {
         "credit": fred.get_series("BAA10Y"),
@@ -49,7 +49,7 @@ def get_data():
     return df
 
 try:
-    df = get_data()
+    df = wcget_data()
     
     # Simple date filtering based on selection
     offset = {"1Y": 365, "3Y": 1095, "5Y": 1825, "10Y": 3650}
@@ -67,23 +67,23 @@ try:
     vix = df['vix'].iloc[-1]
     cli = df['cli_yoy'].iloc[-1]
 
-    def get_badge(val, limit, mode='above'):
+    def wcget_badge(val, limit, mode='above'):
         is_bad = val >= limit if mode == 'above' else val <= limit
         color = "red" if is_bad else "green"
         label = "ALERT" if is_bad else "OK"
         return f":{color}[{label}] ({val:.2f})"
 
     c1.metric("Credit Spread", f"{spread:.2f}", delta_color="inverse")
-    c1.markdown(get_badge(spread, limits['BAA10Y']))
+    c1.markdown(wcget_badge(spread, limits['BAA10Y']))
     
     c2.metric("Yield Curve", f"{yc:.2f}")
-    c2.markdown(get_badge(yc, limits['T10Y2Y'], 'below'))
+    c2.markdown(wcget_badge(yc, limits['T10Y2Y'], 'below'))
     
     c3.metric("OECD CLI YoY", f"{cli:.2f}%")
-    c3.markdown(get_badge(cli, limits['CLI'], 'below'))
+    c3.markdown(wcget_badge(cli, limits['CLI'], 'below'))
     
     c4.metric("VIX", f"{vix:.2f}")
-    c4.markdown(get_badge(vix, limits['VIX']))
+    c4.markdown(wcget_badge(vix, limits['VIX']))
 
     st.divider()
 
